@@ -6,21 +6,20 @@ import os from "node:os";
 import path from "node:path";
 import { openStore, createBooking, invoiceFor, slots } from "../server/core.js";
 import { createApi, deliverMessages } from "../server/api.js";
-
 const date = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
-function fixture() {
+async function fixture() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "shanab-test-"));
-  const store = openStore(path.join(dir, "test.sqlite"));
+  const store = await openStore(path.join(dir, "test.sqlite"), null, null);
   return {
     store,
-    clean() {
-      store.db.close();
+    async clean() {
+      await store.db.close();
       rmSync(dir, { recursive: true, force: true });
     },
   };
 }
-const booking = (store, overrides = {}) =>
-  createBooking(store, {
+const booking = async (store, overrides = {}) =>
+  await createBooking(store, {
     name: "عميل اختبار",
     phone: "0501234567",
     date,
@@ -30,7 +29,7 @@ const booking = (store, overrides = {}) =>
     ...overrides,
   });
 async function app(t) {
-  const f = fixture();
+  const f = await fixture();
   const api = createApi(f.store);
   const server = http.createServer(api);
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
@@ -52,7 +51,7 @@ async function app(t) {
   }
   t.after(async () => {
     await new Promise((r) => server.close(r));
-    f.clean();
+    await f.clean();
   });
   return {
     ...f,
@@ -70,30 +69,30 @@ async function app(t) {
     },
   };
 }
-
-test("booking enforces overlaps for full duration and releases cancelled times", () => {
-  const f = fixture();
+test("booking enforces overlaps for full duration and releases cancelled times", async () => {
+  const f = await fixture();
   try {
-    const b = booking(f.store, { serviceIds: ["combo"] });
+    const b = await booking(f.store, { serviceIds: ["combo"] });
     assert.equal(b.duration, 45);
-    assert.throws(
-      () => booking(f.store, { time: "10:30" }),
+    await assert.rejects(
+      async () => await booking(f.store, { time: "10:30" }),
       (e) => e.status === 409,
     );
     assert.equal(
-      slots(f.store, date, 30).find((s) => s.time === "10:45").available,
+      (await slots(f.store, date, 30)).find((s) => s.time === "10:45")
+        .available,
       true,
     );
-    f.store.db
+    await f.store.db
       .prepare("UPDATE bookings SET status='cancelled' WHERE id=?")
       .run(b.id);
-    assert.equal(booking(f.store, { time: "10:15" }).time, "10:15");
+    assert.equal((await booking(f.store, { time: "10:15" })).time, "10:15");
   } finally {
-    f.clean();
+    await f.clean();
   }
 });
-test("booking rejects invalid dates, phones, duplicate services, consent and late finish", () => {
-  const f = fixture();
+test("booking rejects invalid dates, phones, duplicate services, consent and late finish", async () => {
+  const f = await fixture();
   try {
     for (const override of [
       { date: "2026-02-30" },
@@ -103,9 +102,9 @@ test("booking rejects invalid dates, phones, duplicate services, consent and lat
       { consent: false },
       { time: "21:45", serviceIds: ["care"] },
     ])
-      assert.throws(() => booking(f.store, override));
+      await assert.rejects(async () => await booking(f.store, override));
   } finally {
-    f.clean();
+    await f.clean();
   }
 });
 test("admin protected; bootstrap requires one-time key; cross-origin writes rejected", async (t) => {
@@ -161,21 +160,21 @@ test("concurrent booking requests cannot reserve the same slot", async (t) => {
   ]);
   assert.deepEqual(r.map((x) => x.status).sort(), [201, 409]);
   assert.equal(
-    a.store.db.prepare("SELECT COUNT(*) n FROM bookings").get().n,
+    (await a.store.db.prepare("SELECT COUNT(*) n FROM bookings").get()).n,
     1,
   );
 });
 test("invoice discounts, offers, snapshots, issue immutability and token privacy", async (t) => {
   const a = await app(t);
   await a.login();
-  const b = booking(a.store);
+  const b = await booking(a.store);
   let { body: inv, status } = await a.req("/admin/invoices", "POST", {
     bookingId: b.id,
   });
   assert.equal(status, 200);
   assert.equal(inv.subtotal, 3500);
   assert.equal((await a.req("/invoice/" + inv.token)).status, 404);
-  const hair = a.store.db
+  const hair = await a.store.db
     .prepare("SELECT * FROM services WHERE id='hair'")
     .get();
   assert.equal(
@@ -190,14 +189,13 @@ test("invoice discounts, offers, snapshots, issue immutability and token privacy
   assert.equal(r.status, 200);
   assert.equal(r.body.subtotal, 6000);
   assert.equal(r.body.total, 5400);
-  const beard = a.store.db
+  const beard = await a.store.db
     .prepare("SELECT * FROM services WHERE id='beard'")
     .get();
   assert.equal(
     (await a.req("/admin/services", "POST", { ...beard, price: 45 })).status,
     200,
   );
-
   r = await a.req("/admin/invoices/" + inv.id, "PUT", {
     serviceIds: ["hair"],
     discountType: "percent",
@@ -215,7 +213,7 @@ test("invoice discounts, offers, snapshots, issue immutability and token privacy
     type: "percent",
     value: 20,
   });
-  const offer = a.store.db.prepare("SELECT * FROM offers").get();
+  const offer = await a.store.db.prepare("SELECT * FROM offers").get();
   r = await a.req("/admin/invoices/" + inv.id, "PUT", {
     serviceIds: ["hair", "beard"],
     offerId: offer.id,
@@ -247,9 +245,9 @@ test("invoice discounts, offers, snapshots, issue immutability and token privacy
 test("catalog reorder is atomic and requires all services", async (t) => {
   const a = await app(t);
   await a.login();
-  const ids = a.store.db
-    .prepare("SELECT id FROM services ORDER BY position")
-    .all()
+  const ids = (
+    await a.store.db.prepare("SELECT id FROM services ORDER BY position").all()
+  )
     .map((s) => s.id)
     .reverse();
   assert.equal(
@@ -262,10 +260,11 @@ test("catalog reorder is atomic and requires all services", async (t) => {
     200,
   );
   assert.deepEqual(
-    a.store.db
-      .prepare("SELECT id FROM services ORDER BY position")
-      .all()
-      .map((s) => s.id),
+    (
+      await a.store.db
+        .prepare("SELECT id FROM services ORDER BY position")
+        .all()
+    ).map((s) => s.id),
     ids,
   );
 });
@@ -288,8 +287,8 @@ test("WhatsApp template dispatch uses final total and records provider acceptanc
       else process.env[k] = v;
     }
   });
-  const b = booking(a.store);
-  const inv = invoiceFor(a.store, b.id);
+  const b = await booking(a.store);
+  const inv = await invoiceFor(a.store, b.id);
   await a.req("/admin/invoices/" + inv.id + "/issue", "POST", {});
   await a.req("/admin/invoices/" + inv.id + "/issue", "POST", {});
   let calls = 0;
@@ -313,7 +312,7 @@ test("WhatsApp template dispatch uses final total and records provider acceptanc
   });
   assert.equal(calls, 1);
   assert.equal(
-    a.store.db.prepare("SELECT status FROM messages").get().status,
+    (await a.store.db.prepare("SELECT status FROM messages").get()).status,
     "accepted",
   );
 });
@@ -336,12 +335,12 @@ test("ambiguous WhatsApp network failures require review rather than automatic r
       else process.env[k] = old[k];
     }
   });
-  const b = booking(a.store),
-    inv = invoiceFor(a.store, b.id);
-  a.store.db
+  const b = await booking(a.store),
+    inv = await invoiceFor(a.store, b.id);
+  await a.store.db
     .prepare("UPDATE invoices SET status='issued' WHERE id=?")
     .run(inv.id);
-  a.store.db
+  await a.store.db
     .prepare(
       "INSERT INTO messages(id,invoice_id,status) VALUES('test',?,'pending')",
     )
@@ -356,7 +355,7 @@ test("ambiguous WhatsApp network failures require review rather than automatic r
   });
   assert.equal(calls, 1);
   assert.equal(
-    a.store.db.prepare("SELECT status FROM messages").get().status,
+    (await a.store.db.prepare("SELECT status FROM messages").get()).status,
     "failed",
   );
 });

@@ -4,16 +4,28 @@ import { fileURLToPath } from "node:url";
 import { existsSync, statSync, createReadStream } from "node:fs";
 import { openStore } from "./core.js";
 import { createApi, deliverMessages } from "./api.js";
-
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 if (existsSync(path.join(root, ".env")))
   process.loadEnvFile(path.join(root, ".env"));
 http.setGlobalProxyFromEnv();
-const store = openStore(
-  process.env.DATA_FILE || path.join(root, "data", "shanab.sqlite"),
-);
+let store, adminConfigured;
+try {
+  store = await openStore(
+    process.env.DATA_FILE || path.join(root, "data", "shanab.sqlite"),
+  );
+  adminConfigured = !!(await store.get("admin_hash"));
+} catch (error) {
+  console.error(
+    "Database startup failed:",
+    error.code ?? "CONFIGURATION_ERROR",
+  );
+  console.error(
+    "For Render Free set a valid DATABASE_URL and ADMIN_PASSWORD in private Environment settings, and remove DATA_FILE. SQLite requires a writable persistent directory.",
+  );
+  process.exit(1);
+}
 // An interrupted send is ambiguous: require manual review, never silently resend it.
-store.db
+await store.db
   .prepare(
     "UPDATE messages SET status='failed',error='توقف الخادم أثناء الإرسال؛ تحقق من سجل المزود قبل إعادة المحاولة' WHERE status='sending'",
   )
@@ -101,14 +113,14 @@ timer.unref();
 const port = Number(process.env.PORT || 3000);
 server.listen(port, process.env.HOST || "0.0.0.0", () =>
   console.log(
-    `Shanab server listening on port ${port}; admin ${store.get("admin_hash") ? "configured" : "setup key saved in data/setup-key.txt"}`,
+    `Shanab server listening on port ${port}; admin ${adminConfigured ? "configured" : "setup key saved in data/setup-key.txt"}`,
   ),
 );
 async function shutdown() {
   clearInterval(timer);
   await vite?.close();
-  server.close(() => {
-    store.db.close();
+  server.close(async () => {
+    await store.db.close();
     process.exit(0);
   });
   setTimeout(() => process.exit(0), 5000).unref();
