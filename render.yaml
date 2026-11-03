@@ -1,0 +1,26 @@
+# Deployment template only; no service has been created or charged.
+# A persistent disk requires a paid Render web service plan.
+services:
+  - type: web
+    name: shanab-barber
+    runtime: node
+    plan: starter
+    buildCommand: npm ci --no-audit --no-fund && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/public
+    autoDeployTrigger: 'off'
+    disk:
+      name: shanab-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: NODE_ENV
+        value: production
+      - key: COOKIE_SECURE
+        value: 'true'
+      - key: DATA_FILE
+        value: /var/data/shanab.sqlite
+      - key: ADMIN_PASSWORD
+        sync: false
